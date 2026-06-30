@@ -50,7 +50,7 @@ jobs:
         
       - name: Get apkmd latest release info
         run: |
-          curl --silent https://api.github.com/repos/tanishqmanuja/apkmirror-downloader/releases/latest >> ${{ runner.temp }}/apkmd_release_info.json
+          curl --silent -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/tanishqmanuja/apkmirror-downloader/releases/latest >> ${{ runner.temp }}/apkmd_release_info.json
           echo "apkmd_asset_id=$(jq -r '.assets[] | select(.name == "apkmd") | .id' ${{ runner.temp }}/apkmd_release_info.json)" >> $GITHUB_ENV
 
       - name: Cache apkmd
@@ -69,7 +69,7 @@ jobs:
         
       - name: Get APKEditor latest release info
         run: |
-          curl --silent https://api.github.com/repos/REAndroid/APKEditor/releases/latest >> ${{ runner.temp }}/APKEditor_release_info.json
+          curl --silent -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/REAndroid/APKEditor/releases/latest >> ${{ runner.temp }}/APKEditor_release_info.json
           echo "APKEditor_asset_id=$(jq -r '.assets | first | .id' ${{ runner.temp }}/APKEditor_release_info.json)" >> $GITHUB_ENV
 
       - name: Cache APKEditor
@@ -102,7 +102,7 @@ jobs:
           
       - name: Get Apktool latest release info
         run: |
-          curl --silent https://api.github.com/repos/iBotPeaches/Apktool/releases/latest >> ${{ runner.temp }}/Apktool_release_info.json
+          curl --silent -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/iBotPeaches/Apktool/releases/latest >> ${{ runner.temp }}/Apktool_release_info.json
           echo "apktool_asset_id=$(jq -r '.assets | first | .id' ${{ runner.temp }}/Apktool_release_info.json)" >> $GITHUB_ENV
 
       - name: Cache Apktool
@@ -127,7 +127,7 @@ jobs:
         
       - name: Get Il2CppDumper latest release info
         run: |
-          curl --silent https://api.github.com/repos/Perfare/Il2CppDumper/releases/latest >> ${{ runner.temp }}/Il2CppDumper_release_info.json
+          curl --silent -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/Perfare/Il2CppDumper/releases/latest >> ${{ runner.temp }}/Il2CppDumper_release_info.json
           echo "Il2CppDumper_asset_id=$(jq -r '.assets[] | select(.name | contains("net6") and (contains("win") | not)) | .id' ${{ runner.temp }}/Il2CppDumper_release_info.json)" >> $GITHUB_ENV
 
       - name: Cache Il2CppDumper
@@ -148,7 +148,7 @@ jobs:
           
       - name: Get Generator latest release info
         run: |
-          curl --silent https://api.github.com/repos/DeNcHiK3713/Generator/releases/latest >> ${{ runner.temp }}/Generator_release_info.json
+          curl --silent -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/DeNcHiK3713/Generator/releases/latest >> ${{ runner.temp }}/Generator_release_info.json
           echo "Generator_asset_id=$(jq -r '.assets[] | select(.name == "Generator-net10.0-linux-x64.zip") | .id' ${{ runner.temp }}/Generator_release_info.json)" >> $GITHUB_ENV
 
       - name: Cache Generator
