@@ -1,0 +1,1002 @@
+#include <list>
+#include <vector>
+#include <pthread.h>
+#include <thread>
+#include <cstring>
+#include <string>
+#include <jni.h>
+#include <unistd.h>
+#include <fstream>
+#include <iostream>
+#include <dlfcn.h>
+#include "Includes/Logger.h"
+#include "Includes/obfuscate.h"
+#include "Includes/Utils.hpp"
+#include "Menu/Menu.hpp"
+#include "Menu/Jni.hpp"
+#include "Includes/Macros.h"
+#include "dobby.h"
+#include "Localization/Localizations.h"
+#ifdef __aarch64__
+#include "Includes/arm64-v8a/il2cpp.h"
+#else
+#include "Includes/armeabi-v7a/il2cpp.h"
+#endif
+#include "Includes/Source.h"
+#include <atomic>
+#include <mutex>
+
+extern JavaVM *g_vm;
+extern jclass g_mainClazz;
+
+std::string language = "enUS";
+std::atomic<bool> languageLoaded{ false };
+std::atomic<bool> useDefaultLanguage{ true };
+std::atomic<bool> timeScaleEnabled{ false };
+std::atomic<bool> timeScaleInGameOnlyEnabled{ false };
+std::atomic<float> timeScale{ 1.0f };
+std::atomic<float> originalTimeScale{ 1.0f };
+std::atomic<bool> gameStarted{ false };
+std::atomic<bool> emoteSpamBlocker{ false };
+std::atomic<bool> disableThinkEmotes{ false };
+std::atomic<bool> copySelectedBattleTag{ false };
+std::atomic<bool> gameLoaded{ false };
+std::atomic<int> emotesBeforeBlock{ 0 };
+std::atomic<CardState> golden{ CardState::All };
+std::atomic<CardState> diamond{ CardState::All };
+std::atomic<CardState> signature{ CardState::All };
+std::atomic<DevicePreset> devicePreset{ DevicePreset::Default };
+std::atomic<OSCategory> _os;
+std::atomic<ScreenCategory> _screen;
+std::atomic<bool> copyBattleTagQueued{ false };
+std::atomic<bool> redirectToCNServer{ false };
+
+
+System_String_o *_deviceName;
+float m_lastEnemyEmoteTime;
+int m_lastPlayerId;
+int m_chainedEnemyEmotes;
+
+std::mutex deviceNameMutex, currentOpponentMutex;
+
+uint currentOpponent_gchandle = -1;
+
+// Do not change or translate the first text unless you know what you are doing
+// Assigning feature numbers is optional. Without it, it will automatically count for you, starting from 0
+// Assigned feature numbers can be like any numbers 1,3,200,10... instead in order 0,1,2,3,4,5...
+// ButtonLink, Category, RichTextView and RichWebView is not counted. They can't have feature number assigned
+// Toggle, ButtonOnOff and Checkbox can be switched on by default, if you add True_. Example: CheckBox_True_The Check Box
+// To learn HTML, go to this page: https://www.w3schools.com/
+
+jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
+    jobjectArray ret;
+
+    const char *features[] = {
+            "Category_Global",
+            localization[language][TIMESCALE_ENABLED],
+            localization[language][TIMESCALE_IN_GAME_ONLY],
+            localization[language][TIMESCALE],
+            localization[language][REDIRECT_TO_CN_SERVER],
+            "Category_Gameplay",
+            localization[language][SKIP_HERO_INTRO],
+            localization[language][SHUTUP_BOB],
+            localization[language][EXTENDED_BM],
+            localization[language][DISABLE_RANDOM_FOR_EMOTES],
+            localization[language][EMOTE_SPAM_BLOCKER],
+            localization[language][EMOTES_BEFORE_BLOCK],
+            localization[language][DISABLE_THINK_EMOTES],
+            localization[language][GOLDEN_TEXT],
+            localization[language][DIAMOND_TEXT],
+            localization[language][SIGNATURE_TEXT],
+            localization[language][SHOW_OPPONENT_RANK_IN_GAME],
+            localization[language][DEVICE_PRESET],
+            localization[language][OPERATING_SYSTEM],
+            localization[language][SCREEN_TEXT],
+            localization[language][DEVICE_NAME],
+            /*"Category_Others",
+            localization[language][MOVE_ENEMY_CARDS],*/
+            "Category_Shortcuts",
+            localization[language][COPY_BATTLETAG],
+            localization[language][COPY_BATTLETAG_ON_BATTLEGROUNDS],
+            localization[language][SIMULATE_DISCONNECT],
+    };
+
+    int Total_Feature = (sizeof features / sizeof features[0]);
+    ret = (jobjectArray)
+        env->NewObjectArray(Total_Feature, env->FindClass(OBFUSCATE("java/lang/String")), env->NewStringUTF(""));
+
+    for (int i = 0; i < Total_Feature; i++)
+        env->SetObjectArrayElement(ret, i, env->NewStringUTF(features[i]));
+
+    return (ret);
+}
+
+jobjectArray SettingsList(JNIEnv *env, jobject activityObject) {
+    jobjectArray ret;
+
+    const char *features[] = {
+            "Category_Settings",
+            localization[language][SAVE_SETTINGS], //-1 is checked on Preferences.java
+            localization[language][AUTO_SIZE],
+            localization[language][IGNORE_SCREEN_CUTOUTS],
+            "Category_Menu",
+            localization[language][LANGUAGE],
+            localization[language][CLOSE_SETTINGS],
+    };
+
+    int Total_Feature = (sizeof features /
+        sizeof features[0]); //Now you dont have to manually update the number everytime;
+    ret = (jobjectArray)
+        env->NewObjectArray(Total_Feature, env->FindClass(OBFUSCATE("java/lang/String")),
+            env->NewStringUTF(""));
+    int i;
+    for (i = 0; i < Total_Feature; i++)
+        env->SetObjectArrayElement(ret, i, env->NewStringUTF(features[i]));
+
+    return (ret);
+}
+
+void Time_set_timeScale(float value) {
+    originalTimeScale = value;
+    if (!timeScaleEnabled || (timeScaleInGameOnlyEnabled && !gameStarted)) {
+        il2cpp::Time_set_timeScale(value);
+        return;
+    }
+    if (timeScale > value) {
+        il2cpp::Time_set_timeScale(timeScale * (value + 1.0f) * 0.5f);
+        return;
+    }
+    il2cpp::Time_set_timeScale(value * (timeScale + 1.0f) * 0.5f);
+}
+
+void GameMgr_OnGameSetup(GameMgr_o *_this) {
+    il2cpp::GameMgr_OnGameSetup(_this);
+    gameStarted = true;
+    if (timeScaleInGameOnlyEnabled) {
+        Time_set_timeScale(originalTimeScale);
+    }
+}
+
+void GameMgr_OnGameCanceled(GameMgr_o *_this) {
+    il2cpp::GameMgr_OnGameCanceled(_this);
+    gameStarted = false;
+    if (timeScaleInGameOnlyEnabled) {
+        Time_set_timeScale(originalTimeScale);
+    }
+}
+
+void GameMgr_OnGameEnded(GameMgr_o *_this) {
+    il2cpp::GameMgr_OnGameEnded(_this);
+    gameStarted = false;
+    if (timeScaleInGameOnlyEnabled) {
+        Time_set_timeScale(originalTimeScale);
+    }
+}
+
+void HearthstoneApplication_Awake(Hearthstone_HearthstoneApplication_o *_this) {
+    il2cpp::HearthstoneApplication_Awake(_this);
+    Time_set_timeScale(il2cpp::Time_get_timeScale());
+    gameLoaded = true;
+}
+
+void ThinkEmoteManager_Update(ThinkEmoteManager_o *_this) {
+    if (!disableThinkEmotes) {
+        il2cpp::ThinkEmoteManager_Update(_this);
+    }
+}
+
+BnetRegion Hearthstone_Devices_DeviceLocaleHelper_GetCurrentRegionId() {
+    if (redirectToCNServer) {
+        return BnetRegion::REGION_CN;
+    }
+
+    return il2cpp::Hearthstone_Devices_DeviceLocaleHelper_GetCurrentRegionId();
+}
+
+// Stored config file instance for runtime overrides
+void *g_configFileInstance = nullptr;
+
+void applyCNServerConfig(void *configFile) {
+    if (configFile == nullptr) return;
+    
+    auto cnEnv = il2cpp::il2cpp_string_new(OBFUSCATE("cn.actual.battlenet.com.cn"));
+    auto envOverride = il2cpp::il2cpp_string_new(OBFUSCATE("1"));
+    
+    il2cpp::ConfigFile_Set(configFile, 
+        il2cpp::il2cpp_string_new(OBFUSCATE("Aurora.Env")), cnEnv, nullptr);
+    il2cpp::ConfigFile_Set(configFile, 
+        il2cpp::il2cpp_string_new(OBFUSCATE("Env.Override")), envOverride, nullptr);
+    
+    LOGI(OBFUSCATE("Applied CN server config: Aurora.Env=cn.actual.battlenet.com.cn"));
+}
+
+void ConfigFile_Load_Hook(void *_this, System_String_o *path, bool ignoreUselessLines, const MethodInfo *method) {
+    il2cpp::ConfigFile_Load(_this, path, ignoreUselessLines, method);
+    g_configFileInstance = _this;
+    
+    if (redirectToCNServer) {
+        applyCNServerConfig(_this);
+    }
+}
+
+System_String_o *BnetUtils_GetAuroraEnvironmentName_Hook(const MethodInfo *method) {
+    if (redirectToCNServer) {
+        return il2cpp::il2cpp_string_new(OBFUSCATE("cn.actual.battlenet.com.cn"));
+    }
+    return il2cpp::BnetUtils_GetAuroraEnvironmentName(method);
+}
+
+void SocialToastMgr_AddToast(SocialToastMgr_o *_this, int blocker, System_String_o *textArg, int toastType, float displayTime, bool playSound) {
+    displayTime *= timeScale;
+    il2cpp::SocialToastMgr_AddToast(_this, blocker, textArg, toastType, displayTime, playSound);
+}
+
+bool RemoteActionHandler_CanReceiveEnemyEmote(RemoteActionHandler_o *_this, int emoteType, int playerId) {
+    auto result = il2cpp::RemoteActionHandler_CanReceiveEnemyEmote(_this, emoteType, playerId);
+    if (result && emoteSpamBlocker && emotesBeforeBlock > 0) {
+        float currentTime = il2cpp::UnityEngine_Time_get_time();
+        if (m_lastPlayerId == playerId) {
+            if (m_lastEnemyEmoteTime != 0.0f && currentTime - m_lastEnemyEmoteTime < 9.0f) {
+                m_chainedEnemyEmotes++;
+                if (m_chainedEnemyEmotes > emotesBeforeBlock) {
+                    auto m_squelched = il2cpp::EnemyEmoteHandler_Get()->fields.m_squelched;
+                    il2cpp::Blizzard_T5_Core_Map_int_bool_set_Item(m_squelched, playerId, true);
+                }
+            }
+            else {
+                m_chainedEnemyEmotes = 1;
+            }
+        }
+        else {
+            m_chainedEnemyEmotes = 1;
+            m_lastPlayerId = playerId;
+        }
+        m_lastEnemyEmoteTime = currentTime;
+    }
+    return result;
+}
+
+bool IsControlledByFriendlySidePlayer(GameState_o *gameState, EntityBase_o *_this) {
+    auto id = il2cpp::EntityBase_GetControllerId(_this);
+    auto player = il2cpp::GameState_GetPlayer(gameState, id);
+    
+    if (player == NULL) {
+        return false;
+    }
+    
+    return il2cpp::Player_IsFriendlySide(player);
+}
+
+TAG_PREMIUM EntityBase_GetPremiumType(EntityBase_o *_this) {
+    auto gameMgr = il2cpp::GameMgr_Get();
+    auto gameState = il2cpp::GameState_Get();
+    if (gameMgr != NULL && !il2cpp::GameMgr_IsBattlegrounds(gameMgr) && gameState != NULL && il2cpp::GameState_IsGameCreatedOrCreating(gameState)) {
+        if (il2cpp::EntityBase_HasTag(_this, 1932)) {
+            if (diamond == CardState::All || diamond == CardState::OnlyMy && IsControlledByFriendlySidePlayer(gameState, _this)) {
+                return TAG_PREMIUM::DIAMOND;
+            }
+            if (diamond == CardState::Disabled) {
+                return TAG_PREMIUM::NORMAL;
+            }
+        }
+        if (il2cpp::EntityBase_HasTag(_this, 2589)) {
+            if (signature == CardState::All || signature == CardState::OnlyMy && IsControlledByFriendlySidePlayer(gameState, _this)) {
+                return TAG_PREMIUM::SIGNATURE;
+            }
+            if (signature == CardState::Disabled) {
+                return TAG_PREMIUM::NORMAL;
+            }
+        }
+        if (golden == CardState::All || golden == CardState::OnlyMy && IsControlledByFriendlySidePlayer(gameState, _this)) {
+            return TAG_PREMIUM::GOLDEN;
+        }
+        if (golden == CardState::Disabled) {
+            return TAG_PREMIUM::NORMAL;
+        }
+    }
+    return il2cpp::EntityBase_GetPremiumType(_this);
+}
+
+void Entity_LoadCard(Entity_o *_this, System_String_o *cardId, Entity_LoadCardData_o *data, bool async) {
+    _this->fields.m_realTimePremium = static_cast<int>(EntityBase_GetPremiumType(reinterpret_cast<EntityBase_o *>(_this)));
+    il2cpp::Entity_LoadCard(_this, cardId, data, async);
+}
+
+void UpdateCurrentOpponent() {
+    std::lock_guard<std::mutex> lock(currentOpponentMutex);
+
+    if (currentOpponent_gchandle != -1) {
+        il2cpp::il2cpp_gchandle_free(currentOpponent_gchandle);
+        currentOpponent_gchandle = -1;
+    }
+    auto gameState = il2cpp::GameState_Get();
+    if (gameState == NULL) {
+        return;
+    }
+    auto opposingSidePlayer = il2cpp::GameState_GetOpposingSidePlayer(gameState);
+    if (opposingSidePlayer == NULL) {
+        return;
+    }
+    auto currentOpponent = il2cpp::BnetPresenceMgr_GetPlayer(il2cpp::BnetPresenceMgr_Get(), opposingSidePlayer->fields.m_gameAccountId);
+    if (currentOpponent) {
+        currentOpponent_gchandle = il2cpp::il2cpp_gchandle_new(currentOpponent, false);
+    }
+}
+
+void UpdateCurrentOpponent(int opponentPlayerId) {
+    std::lock_guard<std::mutex> lock(currentOpponentMutex);
+
+    if (currentOpponent_gchandle != -1) {
+        il2cpp::il2cpp_gchandle_free(currentOpponent_gchandle);
+        currentOpponent_gchandle = -1;
+    }
+    auto gameState = il2cpp::GameState_Get();
+    auto playerInfoMap = reinterpret_cast<Blizzard_T5_Core_Map_TKey__TValue__o *>(il2cpp::GameState_GetPlayerInfoMap(gameState));
+    if (gameState == NULL || !il2cpp::Blizzard_T5_Core_Map_int_object_ContainsKey(playerInfoMap, opponentPlayerId, *il2cpp::Method_Blizzard_T5_Core_Map_int_SharedPlayerInfo_ContainsKey)) {
+        return;
+    }
+    auto id = reinterpret_cast<SharedPlayerInfo_o *>(il2cpp::Blizzard_T5_Core_Map_int_object_get_Item(playerInfoMap, opponentPlayerId, *il2cpp::Method_Blizzard_T5_Core_Map_int_SharedPlayerInfo_get_Item))->fields.m_gameAccountId;
+    if (id == NULL) {
+        return;
+    }
+    auto currentOpponent = il2cpp::BnetPresenceMgr_GetPlayer(il2cpp::BnetPresenceMgr_Get(), id);
+    if (currentOpponent) {
+        currentOpponent_gchandle = il2cpp::il2cpp_gchandle_new(currentOpponent, false);
+    }
+}
+
+BnetPlayer_o *GetSelectedOpponent(PlayerLeaderboardCard_o *_this) {
+    auto opponentPlayerId = il2cpp::EntityBase_GetTag(reinterpret_cast<EntityBase_o *>(_this->fields.m_playerHeroEntity), 30);
+    auto gameState = il2cpp::GameState_Get();
+    auto playerInfoMap = reinterpret_cast<Blizzard_T5_Core_Map_TKey__TValue__o *>(il2cpp::GameState_GetPlayerInfoMap(gameState));
+    if (gameState == NULL || !il2cpp::Blizzard_T5_Core_Map_int_object_ContainsKey(playerInfoMap, opponentPlayerId, *il2cpp::Method_Blizzard_T5_Core_Map_int_SharedPlayerInfo_ContainsKey)) {
+        return NULL;
+    }
+    auto id = reinterpret_cast<SharedPlayerInfo_o *>(il2cpp::Blizzard_T5_Core_Map_int_object_get_Item(playerInfoMap, opponentPlayerId, *il2cpp::Method_Blizzard_T5_Core_Map_int_SharedPlayerInfo_get_Item))->fields.m_gameAccountId;
+    if (id == NULL) {
+        return NULL;
+    }
+    return il2cpp::BnetPresenceMgr_GetPlayer(il2cpp::BnetPresenceMgr_Get(), id);
+}
+
+void Gameplay_OnCreateGame(Gameplay_o *_this, int phase, Il2CppObject *userData) {
+    il2cpp::Gameplay_OnCreateGame(_this, phase, userData);
+    UpdateCurrentOpponent();
+}
+
+void PlayerLeaderboardManager_SetNextOpponent(PlayerLeaderboardManager_o *_this, int opponentPlayerId) {
+    il2cpp::PlayerLeaderboardManager_SetNextOpponent(_this, opponentPlayerId);
+    if (opponentPlayerId != 0) {
+        UpdateCurrentOpponent(opponentPlayerId);
+    }
+}
+
+void PlayerLeaderboardManager_SetCurrentOpponent(PlayerLeaderboardManager_o *_this, int opponentPlayerId) {
+    il2cpp::PlayerLeaderboardManager_SetCurrentOpponent(_this, opponentPlayerId);
+    if (opponentPlayerId != -1) {
+        UpdateCurrentOpponent(opponentPlayerId);
+    }
+}
+
+void PlayerLeaderboardCard_NotifyMousedOver(PlayerLeaderboardCard_o *_this) {
+    auto m_mousedOver = _this->fields.m_mousedOver;
+    il2cpp::PlayerLeaderboardCard_NotifyMousedOver(_this);
+    if (m_mousedOver) {
+        return;
+    }
+
+    if (copySelectedBattleTag) {
+        auto currentOpponent = GetSelectedOpponent(_this);
+        if (currentOpponent != NULL) {
+            BnetBattleTag_o *battleTag = il2cpp::BnetPlayer_GetBattleTag(currentOpponent);
+            if (battleTag != NULL) {
+                System_String_o *str = il2cpp::BnetBattleTag_GetString(battleTag);
+                il2cpp::ClipboardUtils_CopyToClipboard(str);
+                il2cpp::UIStatus_AddInfo(il2cpp::UIStatus_Get(), str);
+            }
+        }
+    }
+}
+
+System_String_o *GetMD5(System_Byte_array *bytes) {
+    auto md5 = il2cpp::System_Security_Cryptography_MD5_Create();
+    auto hash = il2cpp::System_Security_Cryptography_HashAlgorithm_ComputeHash((System_Security_Cryptography_HashAlgorithm_o *)md5, bytes);
+
+    auto sb = (System_Text_StringBuilder_o *)il2cpp::il2cpp_object_new(*il2cpp::System_Text_StringBuilder_TypeInfo);
+    il2cpp::System_Text_StringBuilder_ctor(sb);
+
+    auto x2 = u"x2"_SS;
+    for (int i = 0; i < hash->max_length; i++) {
+        il2cpp::System_Text_StringBuilder_AppendString(sb, il2cpp::System_Byte_ToStringFormat(&hash->m_Items[i], x2));
+    }
+    return ((System_String_o * (*)(System_Text_StringBuilder_o *, const MethodInfo *)) sb->klass->vtable._3_ToString.methodPtr)(sb, sb->klass->vtable._3_ToString.method);
+}
+
+System_String_o *GetUniqueDeviceID(OSCategory os, ScreenCategory screen, System_String_o *deviceName/*, string operatingSystem*/) {
+    /*
+     * public class XmlConvert
+     * {
+     *     //
+     *     public static Guid ToGuid(string s)
+     *     {
+     *         return new Guid(s);
+     *     }
+     *     //
+     * }
+     *
+     * Can also be:
+     * System_Guid_o guid;
+     * guid.fields._d = str; ?
+     * il2cpp::System_Guid_ctor(guid, NULL);
+    */
+    auto deviceId = il2cpp::UnityEngine_SystemInfo_get_deviceUniqueIdentifier();
+
+    System_String_o * osStr;
+    switch (os) {
+    case OSCategory::PC:
+        osStr = u"PC"_SS;
+        break;
+    case OSCategory::Mac:
+        osStr = u"Mac"_SS;
+        break;
+    case OSCategory::iOS:
+        osStr = u"iOS"_SS;
+        break;
+    case OSCategory::Android:
+        osStr = u"Android"_SS;
+        break;
+    default:
+        osStr = u""_SS;
+        break;
+    }
+
+    System_String_o * screenStr;
+    switch (screen) {
+    case ScreenCategory::Phone:
+        screenStr = u"Phone"_SS;
+        break;
+    case ScreenCategory::MiniTablet:
+        screenStr = u"MiniTablet"_SS;
+        break;
+    case ScreenCategory::Tablet:
+        screenStr = u"Tablet"_SS;
+        break;
+    case ScreenCategory::PC:
+        screenStr = u"PC"_SS;
+        break;
+    default:
+        screenStr = u""_SS;
+        break;
+    }
+
+    auto arr = (System_String_array *)il2cpp::il2cpp_array_new_specific(*il2cpp::System_String_array_TypeInfo, 5);
+
+    auto handleArr = il2cpp::il2cpp_gchandle_new((Il2CppObject *)arr, false);
+
+    ARRAY_SETREF(arr, 0, u"MixModeD"_SS);
+    ARRAY_SETREF(arr, 1, deviceId);
+    ARRAY_SETREF(arr, 2, osStr);
+    ARRAY_SETREF(arr, 3, screenStr);
+    ARRAY_SETREF(arr, 4, deviceName);
+
+    auto str = il2cpp::System_String_Concat(arr);
+
+    il2cpp::il2cpp_gchandle_free(handleArr);
+
+    switch (os) {
+    case OSCategory::PC:
+        return il2cpp::Crypto_SHA1_Calc(str);
+    case OSCategory::Mac:
+    case OSCategory::iOS: {
+        auto guid = il2cpp::System_Xml_XmlConvert_ToGuid(GetMD5(il2cpp::System_Text_Encoding_GetBytes(il2cpp::System_Text_Encoding_get_Default(), str)));
+        return il2cpp::System_String_ToUpper(il2cpp::System_Guid_ToString(&guid));
+    }
+    case OSCategory::Android:
+        return GetMD5(il2cpp::System_Text_Encoding_GetBytes(il2cpp::System_Text_Encoding_get_Default(), str));
+    default:
+        return u"n/a"_SS;
+    }
+}
+
+PegasusShared_Platform_o *Network_GetPlatformBuilder(Network_o *_this) {
+    auto result = il2cpp::Network_GetPlatformBuilder(_this);
+    OSCategory os;
+    ScreenCategory screen;
+    System_String_o *deviceName;
+    switch (devicePreset) {
+    case DevicePreset::iPad:
+        os = OSCategory::iOS;
+        screen = ScreenCategory::Tablet;
+        deviceName = u"iPad13,11"_SS;
+        break;
+    case DevicePreset::iPhone:
+        os = OSCategory::iOS;
+        screen = ScreenCategory::Phone;
+        deviceName = u"iPhone13,4"_SS;
+        break;
+    case DevicePreset::Phone:
+        os = OSCategory::Android;
+        screen = ScreenCategory::Phone;
+        deviceName = u"SAMSUNG-SM-G930FD"_SS;
+        break;
+    case DevicePreset::Tablet:
+        os = OSCategory::Android;
+        screen = ScreenCategory::Tablet;
+        deviceName = u"SAMSUNG-SM-G920F"_SS;
+        break;
+    case DevicePreset::HuaweiPhone:
+        os = OSCategory::Android;
+        screen = ScreenCategory::Phone;
+        deviceName = u"Huawei Nova 8"_SS;
+        break;
+    case DevicePreset::PC:
+        os = OSCategory::PC;
+        screen = ScreenCategory::PC;
+        deviceName = u"System Product Name (System manufacturer)"_SS;
+        break;
+    case DevicePreset::Mac:
+        os = OSCategory::Mac;
+        screen = ScreenCategory::PC;
+        deviceName = u"MacBookPro11,3"_SS;
+        break;
+    case DevicePreset::Custom:
+        os = _os;
+        screen = _screen;
+        deviceNameMutex.lock();
+        deviceName = _deviceName;
+        deviceNameMutex.unlock();
+        break;
+    case DevicePreset::Default:
+    default:
+        return result;
+    }
+
+    result->fields._Os_k__BackingField = static_cast<int>(os);
+    result->fields._Screen_k__BackingField = static_cast<int>(screen);
+    result->fields._Name_k__BackingField = deviceName;
+    result->fields._UniqueDeviceIdentifier = GetUniqueDeviceID(os, screen, deviceName);
+    result->fields._Store = 0;
+
+    return result;
+}
+
+bool UpdateUtils_OpenAppStore() {
+    il2cpp::UnityEngine_Application_OpenURL(u"https://github.com/DeNcHiK3713/AndroidMixMod/releases/latest"_SS);
+    return true;
+}
+
+void reload_features() {
+    if (g_vm == NULL)
+    {
+        LOGE("g_vm is null");
+        return;
+    }
+
+    JNIEnv *env;
+    int getEnvStat = g_vm->GetEnv((void **)&env, JNI_VERSION_1_6);
+    if (getEnvStat == JNI_EDETACHED) {
+        if (g_vm->AttachCurrentThread(&env, NULL) != 0) {
+            LOGE("Failed to attach env");
+            return;
+        }
+    } else if (getEnvStat == JNI_EVERSION) {
+        LOGE("GetEnv: version not supported");
+        return;
+    }
+    if (env == NULL)
+    {
+        LOGE("env is null");
+        return;
+    }
+
+    if (g_mainClazz == NULL)
+    {
+        LOGE("g_mainClazz is null");
+        return;
+    }
+
+    jmethodID reloadFeaturesMethod = env->GetStaticMethodID(g_mainClazz, "ReloadFeatures", "()V");
+    if (reloadFeaturesMethod == NULL)
+    {
+        LOGE("reloadFeaturesMethod is null");
+        return;
+    }
+
+    env->CallStaticVoidMethod(g_mainClazz, reloadFeaturesMethod);
+    
+    g_vm->DetachCurrentThread();
+}
+
+void Localization_SetPegLocaleName(Localization_o *_this, System_String_o *localeName) {
+    il2cpp::Localization_SetPegLocaleName(_this, localeName);
+    if (useDefaultLanguage) {
+        bool reload = false;
+        
+        auto newLanguage = SS_to_str(localeName);
+        if (localization.find(newLanguage) == localization.end()) {
+            if (language != "enUS")
+            {
+                reload = true;
+                language = "enUS";
+            }
+        }
+        else {
+            if (language != newLanguage)
+            {
+                reload = true;
+                language = newLanguage;
+            }
+        }
+
+        if (reload) {
+            std::thread(reload_features).detach();
+        }
+    }
+    languageLoaded = true;
+}
+
+void copyBattleTag() {
+    auto currentOpponent = (BnetPlayer_o *)il2cpp::il2cpp_gchandle_get_target(currentOpponent_gchandle);
+
+    if (currentOpponent != NULL) {
+        BnetBattleTag_o *battleTag = il2cpp::BnetPlayer_GetBattleTag(currentOpponent);
+        if (battleTag != NULL) {
+            System_String_o *str = il2cpp::BnetBattleTag_GetString(battleTag);
+            il2cpp::ClipboardUtils_CopyToClipboard(str);
+            il2cpp::UIStatus_AddInfo(il2cpp::UIStatus_Get(), str);
+        }
+    }
+}
+
+void Network_Update(Network_o *_this) {
+    il2cpp::Network_Update(_this);
+    
+    if (copyBattleTagQueued) {
+        copyBattleTagQueued = false;
+        copyBattleTag();
+    }
+}
+
+void simulateDisconnect() {
+    void *thread = il2cpp::il2cpp_thread_attach(il2cpp::il2cpp_domain_get());
+
+    il2cpp::Network_SimulateUncleanDisconnectFromGameServer(il2cpp::Network_Get());
+
+    il2cpp::il2cpp_thread_detach(thread);
+}
+
+void setDefaultLanguage() {
+    void *thread = il2cpp::il2cpp_thread_attach(il2cpp::il2cpp_domain_get());
+    bool reload = false;
+
+    auto locale = il2cpp::Localization_GetLocaleName();
+    if (locale == NULL) {
+        if (language != "enUS")
+        {
+            reload = true;
+            language = "enUS";
+        }
+    } else {
+        auto newLanguage = SS_to_str(locale);
+        if (localization.find(newLanguage) == localization.end()) {
+            if (language != "enUS")
+            {
+                reload = true;
+                language = "enUS";
+            }
+        }
+        else {
+            if (language != newLanguage)
+            {
+                reload = true;
+                language = newLanguage;
+            }
+        }
+    }
+
+    il2cpp::il2cpp_thread_detach(thread);
+    if (reload) {
+        std::thread(reload_features).detach();
+    }
+}
+
+//Target main lib here
+#define targetLibName OBFUSCATE("libil2cpp.so")
+
+void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featName, jint value, jlong Lvalue, jboolean boolean, jstring text) {
+    auto cstr = text != NULL ? env->GetStringUTFChars(text, 0) : "";
+
+    LOGD(OBFUSCATE("Feature name: %d - %s | Value: = %d | Lvalue: = %ld | Bool: = %d | Text: = %s"), featNum, env->GetStringUTFChars(featName, 0), value, Lvalue, boolean, cstr);
+
+    switch (featNum) {
+    case 0:
+        timeScaleEnabled = boolean;
+        if (gameLoaded) {
+            Time_set_timeScale(originalTimeScale);
+        }
+        break;
+    case 1:
+        timeScale = value / 100.0f;
+        if (gameLoaded) {
+            Time_set_timeScale(originalTimeScale);
+        }
+        break;
+    case 2:
+        PATCH_SWITCH(targetLibName, MulliganManager_HandleGameStart_Patch_Offset, MulliganManager_HandleGameStart_Patch_Data, boolean);
+        break;
+    case 3:
+        PATCH_SWITCH(targetLibName, TB_BaconShop_HandleGameOverWithTiming_Patch_Offset, TB_BaconShop_HandleGameOverWithTiming_Patch_Data, boolean);
+        PATCH_SWITCH(targetLibName, TB_BaconShop_PlayBobLineWithoutText_Patch_Offset, TB_BaconShop_PlayBobLineWithoutText_Patch_Data, boolean);
+        break;
+    case 4:
+        PATCH_SWITCH(targetLibName, EmoteHandler_EmoteSpamBlocked_Patch_Offset, EmoteHandler_EmoteSpamBlocked_Patch_Data, boolean);
+        break;
+    case 5:
+        PATCH_SWITCH(targetLibName, EmoteHandler_HandleInput_Patch_Offset, EmoteHandler_HandleInput_Patch_Data, boolean);
+        break;
+    case 6:
+        emoteSpamBlocker = boolean;
+        PATCH_SWITCH(targetLibName, EnemyEmoteHandler_Awake_Patch_Offset, EnemyEmoteHandler_Awake_Patch_Data, emoteSpamBlocker && emotesBeforeBlock == 0);
+        break;
+    case 7:
+        emotesBeforeBlock = value;
+        PATCH_SWITCH(targetLibName, EnemyEmoteHandler_Awake_Patch_Offset, EnemyEmoteHandler_Awake_Patch_Data, emoteSpamBlocker && emotesBeforeBlock == 0);
+        break;
+    case 8:
+        disableThinkEmotes = boolean;
+        break;
+    case 9:
+        golden = static_cast<CardState>(value);
+        break;
+    case 10:
+        diamond = static_cast<CardState>(value);
+        break;
+    case 21:
+        signature = static_cast<CardState>(value);
+        break;
+    case 11:
+        PATCH_SWITCH(targetLibName, NameBanner_Initialize_Patch_Offset, NameBanner_Initialize_Patch_Data, boolean);
+        PATCH_SWITCH(targetLibName, NameBanner_UpdateMedalWhenReady_Patch_Offset, NameBanner_UpdateMedalWhenReady_Patch_Data, boolean);
+        break;
+    case 16:
+        devicePreset = static_cast<DevicePreset>(value);
+        break;
+    case 17:
+        _os = static_cast<OSCategory>(value);
+        break;
+    case 18:
+        _screen = static_cast<ScreenCategory>(value);
+        break;
+    case 19:
+        deviceNameMutex.lock();
+        _deviceName = il2cpp::il2cpp_string_new(cstr);
+        deviceNameMutex.unlock();
+        break;
+    case 22:
+        if (gameLoaded) {
+            copyBattleTagQueued = true;
+        }
+        break;
+    case 23:
+        copySelectedBattleTag = boolean;
+        break;
+    case 24:
+        if (gameLoaded) {
+            std::thread(simulateDisconnect).detach();
+        }
+        break;
+    case 25:
+        timeScaleInGameOnlyEnabled = boolean;
+        if (gameLoaded) {
+            Time_set_timeScale(originalTimeScale);
+        }
+        break;
+    case 26:
+        redirectToCNServer = boolean;
+        if (boolean && g_configFileInstance != nullptr) {
+            applyCNServerConfig(g_configFileInstance);
+        }
+        break;
+    case -11:
+        PATCH_SWITCH(OBFUSCATE("libunity.so"), Unity_AndroidRenderOutsideSafeArea_Offset, "30", boolean);
+        break;
+    case -10:
+        bool reload = false;
+        switch (value) {
+        case 0:
+            useDefaultLanguage = true;
+            if (!languageLoaded) {
+                break;
+            }
+            std::thread(setDefaultLanguage).detach();
+            break;
+        case 1:
+            useDefaultLanguage = false;
+            if (language != "enUS")
+            {
+                reload = true;
+                language = "enUS";
+            }
+            break;
+        case 2:
+            useDefaultLanguage = false;
+            if (language != "ruRU")
+            {
+                reload = true;
+                language = "ruRU";
+            }
+            break;
+        case 3:
+            useDefaultLanguage = false;
+            if (language != "zhCN")
+            {
+                reload = true;
+                language = "zhCN";
+            }
+            break;
+        }
+        if (reload) {
+            std::thread(reload_features).detach();
+        }
+        break;
+    }
+}
+
+// we will run our hacks in a new thread so our while loop doesn't block process main thread
+void hack_thread() {
+    // This loop should be always enabled in unity game
+    // because libil2cpp.so is not loaded into memory immediately.
+    while (!isLibraryLoaded(targetLibName)) {
+        sleep(1); // Wait for target lib be loaded.
+    }
+
+    il2cpp::il2cpp_object_new = reinterpret_cast<Il2CppObject * (*)(Il2CppClass * klass)>(getAbsoluteAddress(targetLibName, OBFUSCATE("il2cpp_object_new")));
+    il2cpp::il2cpp_domain_get = reinterpret_cast<void *(*)()>(getAbsoluteAddress(targetLibName, OBFUSCATE("il2cpp_domain_get")));
+    il2cpp::il2cpp_thread_attach = reinterpret_cast<void *(*)(void *domain)>(getAbsoluteAddress(targetLibName, OBFUSCATE("il2cpp_thread_attach")));
+    il2cpp::il2cpp_thread_detach = reinterpret_cast<void (*)(void *thread)>(getAbsoluteAddress(targetLibName, OBFUSCATE("il2cpp_thread_detach")));
+    il2cpp::il2cpp_gchandle_new = reinterpret_cast<uint(*)(void *object, bool weak)>(getAbsoluteAddress(targetLibName, OBFUSCATE("il2cpp_gchandle_new")));
+    il2cpp::il2cpp_gchandle_free = reinterpret_cast<void (*)(uint gchandle)>(getAbsoluteAddress(targetLibName, OBFUSCATE("il2cpp_gchandle_free")));
+    il2cpp::il2cpp_gchandle_get_target = reinterpret_cast<Il2CppObject* (*)(uint32_t gchandle)>(getAbsoluteAddress(targetLibName, OBFUSCATE("il2cpp_gchandle_get_target")));
+
+    il2cpp::il2cpp_string_new = reinterpret_cast<System_String_o * (*)(const char *text)>(getAbsoluteAddress(targetLibName, OBFUSCATE("il2cpp_string_new")));
+    il2cpp::il2cpp_string_new_utf16 = reinterpret_cast<System_String_o * (*)(const Il2CppChar * text, int len)>(getAbsoluteAddress(targetLibName, OBFUSCATE("il2cpp_string_new_utf16")));
+
+
+
+    il2cpp::il2cpp_array_new_specific = reinterpret_cast<void *(*)(Il2CppClass * klass, size_t length)>(getAbsoluteAddress(targetLibName, OBFUSCATE("il2cpp_array_new_specific")));
+    il2cpp::il2cpp_gc_wbarrier_set_field = reinterpret_cast<void (*)(Il2CppObject *obj, void **targetAddress, void *object)>(getAbsoluteAddress(targetLibName, OBFUSCATE("il2cpp_gc_wbarrier_set_field")));
+
+    il2cpp::System_String_Concat = reinterpret_cast<System_String_o* (*)(System_String_array* values)>(getAbsoluteAddress(targetLibName, System_String_Concat_Offset));
+
+    il2cpp::System_String_array_TypeInfo = reinterpret_cast<struct Il2CppClass **>(getAbsoluteAddress(targetLibName, System_String_array_TypeInfo_Offset));
+    il2cpp::OSCategory_TypeInfo = reinterpret_cast<struct Il2CppClass **>(getAbsoluteAddress(targetLibName, OSCategory_TypeInfo_Offset));
+    il2cpp::ScreenCategory_TypeInfo = reinterpret_cast<struct Il2CppClass **>(getAbsoluteAddress(targetLibName, ScreenCategory_TypeInfo_Offset));
+
+    il2cpp::UnityEngine_SystemInfo_get_deviceUniqueIdentifier = reinterpret_cast<System_String_o * (*)()>(getAbsoluteAddress(targetLibName, UnityEngine_SystemInfo_get_deviceUniqueIdentifier_Offset));
+
+    il2cpp::System_Text_StringBuilder_ctor = reinterpret_cast<void (*)(System_Text_StringBuilder_o * _this)>(getAbsoluteAddress(targetLibName, System_Text_StringBuilder_ctor_Offset));
+
+    il2cpp::Time_get_timeScale = reinterpret_cast<float (*)()>(getAbsoluteAddress(targetLibName, Time_get_timeScale_Offset));
+
+    il2cpp::Crypto_SHA1_Calc = reinterpret_cast<System_String_o * (*)(System_String_o * message)>(getAbsoluteAddress(targetLibName, Crypto_SHA1_Calc_Offset));
+
+    il2cpp::System_Security_Cryptography_MD5_Create = reinterpret_cast<System_Security_Cryptography_MD5_o * (*)()>(getAbsoluteAddress(targetLibName, System_Security_Cryptography_MD5_Create_Offset));
+    il2cpp::System_Security_Cryptography_HashAlgorithm_ComputeHash = reinterpret_cast<System_Byte_array * (*)(System_Security_Cryptography_HashAlgorithm_o * _this, System_Byte_array * buffer)>(getAbsoluteAddress(targetLibName, System_Security_Cryptography_HashAlgorithm_ComputeHash_Offset));
+
+    il2cpp::System_Text_StringBuilder_TypeInfo = reinterpret_cast<struct Il2CppClass **>(getAbsoluteAddress(targetLibName, System_Text_StringBuilder_TypeInfo_Offset));
+    il2cpp::System_Text_StringBuilder_AppendString = reinterpret_cast<System_Text_StringBuilder_o * (*)(System_Text_StringBuilder_o * _this, System_String_o * value)>(getAbsoluteAddress(targetLibName, System_Text_StringBuilder_AppendString_Offset));
+
+    il2cpp::System_Byte_ToStringFormat = reinterpret_cast<System_String_o * (*)(uint8_t * _this, System_String_o * format)>(getAbsoluteAddress(targetLibName, System_Byte_ToStringFormat_Offset));
+
+    il2cpp::System_Guid_ctor = reinterpret_cast<void (*)(System_Guid_o _this, System_String_o * g)>(getAbsoluteAddress(targetLibName, System_Guid_ctor_Offset));
+
+    il2cpp::System_Text_Encoding_get_Default = reinterpret_cast<System_Text_Encoding_o * (*)()>(getAbsoluteAddress(targetLibName, System_Text_Encoding_get_Default_Offset));
+    il2cpp::System_Text_Encoding_GetBytes = reinterpret_cast<System_Byte_array * (*)(System_Text_Encoding_o * _this, System_String_o * str)>(getAbsoluteAddress(targetLibName, System_Text_Encoding_GetBytes_Offset));
+
+    il2cpp::System_String_ToUpper = reinterpret_cast<System_String_o * (*)(System_String_o * _this)>(getAbsoluteAddress(targetLibName, System_String_ToUpper_Offset));
+
+    il2cpp::Method_Blizzard_T5_Core_Map_int_SharedPlayerInfo_ContainsKey = reinterpret_cast<struct MethodInfo **>(getAbsoluteAddress(targetLibName, Method_Blizzard_T5_Core_Map_int_SharedPlayerInfo_ContainsKey_Offset));
+    il2cpp::Method_Blizzard_T5_Core_Map_int_SharedPlayerInfo_get_Item = reinterpret_cast<struct MethodInfo **>(getAbsoluteAddress(targetLibName, Method_Blizzard_T5_Core_Map_int_SharedPlayerInfo_get_Item_Offset));
+
+    il2cpp::EnemyEmoteHandler_Get = reinterpret_cast<EnemyEmoteHandler_o * (*)()>(getAbsoluteAddress(targetLibName, EnemyEmoteHandler_Get_Offset));
+
+    il2cpp::Blizzard_T5_Core_Map_int_bool_set_Item = reinterpret_cast<void (*)(Blizzard_T5_Core_Map_int__bool__o * __this, int key, bool value)>(getAbsoluteAddress(targetLibName, Blizzard_T5_Core_Map_int_bool_set_Item_Offset));
+
+    il2cpp::UnityEngine_Time_get_time = reinterpret_cast<float (*)()>(getAbsoluteAddress(targetLibName, UnityEngine_Time_get_time_Offset));
+
+    il2cpp::GameMgr_Get = reinterpret_cast<GameMgr_o * (*)()>(getAbsoluteAddress(targetLibName, GameMgr_Get_Offset));
+    il2cpp::GameMgr_IsBattlegrounds = reinterpret_cast<bool (*)(GameMgr_o * _this)>(getAbsoluteAddress(targetLibName, GameMgr_IsBattlegrounds_Offset));
+
+    il2cpp::GameState_Get = reinterpret_cast<GameState_o * (*)()>(getAbsoluteAddress(targetLibName, GameState_Get_Offset));
+    il2cpp::GameState_IsGameCreatedOrCreating = reinterpret_cast<bool (*)(GameState_o * _this)>(getAbsoluteAddress(targetLibName, GameState_IsGameCreatedOrCreating_Offset));
+    il2cpp::GameState_GetOpposingSidePlayer = reinterpret_cast<Player_o * (*)(GameState_o * _this)>(getAbsoluteAddress(targetLibName, GameState_GetOpposingSidePlayer_Offset));
+    il2cpp::GameState_GetPlayerInfoMap = reinterpret_cast<Blizzard_T5_Core_Map_int__SharedPlayerInfo__o * (*)(GameState_o * _this)>(getAbsoluteAddress(targetLibName, GameState_GetPlayerInfoMap_Offset));
+
+    il2cpp::Blizzard_T5_Core_Map_int_object_ContainsKey = reinterpret_cast<bool (*)(Blizzard_T5_Core_Map_TKey__TValue__o * _this, int key, const MethodInfo * method)>(getAbsoluteAddress(targetLibName, Blizzard_T5_Core_Map_int_object_ContainsKey_Offset));
+    il2cpp::Blizzard_T5_Core_Map_int_object_get_Item = reinterpret_cast<Il2CppObject * (*)(Blizzard_T5_Core_Map_TKey__TValue__o * _this, int key, const MethodInfo * method)>(getAbsoluteAddress(targetLibName, Blizzard_T5_Core_Map_int_object_get_Item_Offset));
+
+    il2cpp::EntityBase_HasTag = reinterpret_cast<bool (*)(EntityBase_o * _this, int tag)>(getAbsoluteAddress(targetLibName, EntityBase_HasTag_Offset));
+    il2cpp::EntityBase_GetControllerId = reinterpret_cast<int (*)(EntityBase_o * _this)>(getAbsoluteAddress(targetLibName, EntityBase_GetControllerId_Offset));
+    il2cpp::GameState_GetPlayer = reinterpret_cast<Player_o * (*)(GameState_o *_this, int id)>(getAbsoluteAddress(targetLibName, GameState_GetPlayer_Offset));
+    il2cpp::Player_IsFriendlySide = reinterpret_cast<bool (*)(Player_o *_this)>(getAbsoluteAddress(targetLibName, Player_IsFriendlySide_Offset));
+
+    il2cpp::System_String_IsNullOrEmpty = reinterpret_cast<bool (*)(System_String_o * value)>(getAbsoluteAddress(targetLibName, System_String_IsNullOrEmpty_Offset));
+
+    il2cpp::Network_Get = reinterpret_cast<Network_o * (*)()>(getAbsoluteAddress(targetLibName, Network_Get_Offset));
+    il2cpp::Network_SimulateUncleanDisconnectFromGameServer = reinterpret_cast<void (*)(Network_o * _this)>(getAbsoluteAddress(targetLibName, Network_SimulateUncleanDisconnectFromGameServer_Offset));
+
+    il2cpp::BnetPresenceMgr_Get = reinterpret_cast<BnetPresenceMgr_o * (*)()>(getAbsoluteAddress(targetLibName, BnetPresenceMgr_Get_Offset));
+    il2cpp::BnetPresenceMgr_GetPlayer = reinterpret_cast<BnetPlayer_o * (*)(BnetPresenceMgr_o * _this, Blizzard_GameService_SDK_Client_Integration_BnetGameAccountId_o * id)>(getAbsoluteAddress(targetLibName, BnetPresenceMgr_GetPlayer_Offset));
+    il2cpp::BnetPlayer_GetBattleTag = reinterpret_cast<BnetBattleTag_o * (*)(BnetPlayer_o * _this)>(getAbsoluteAddress(targetLibName, BnetPlayer_GetBattleTag_Offset));
+    il2cpp::BnetBattleTag_GetString = reinterpret_cast<System_String_o * (*)(BnetBattleTag_o * _this)>(getAbsoluteAddress(targetLibName, BnetBattleTag_GetString_Offset));
+
+    il2cpp::ClipboardUtils_CopyToClipboard = reinterpret_cast<void (*)(System_String_o * copyText)>(getAbsoluteAddress(targetLibName, ClipboardUtils_CopyToClipboard_Offset));
+
+    il2cpp::UIStatus_Get = reinterpret_cast<UIStatus_o * (*)()>(getAbsoluteAddress(targetLibName, UIStatus_Get_Offset));
+    il2cpp::UIStatus_AddInfo = reinterpret_cast<void (*)(UIStatus_o * _this, System_String_o * message)>(getAbsoluteAddress(targetLibName, UIStatus_AddInfo_Offset));
+
+    il2cpp::HistoryManager_Get = reinterpret_cast<HistoryManager_o * (*)()>(getAbsoluteAddress(targetLibName, HistoryManager_Get_Offset));
+    il2cpp::HistoryManager_GetCurrentBigCard = reinterpret_cast<PlayerLeaderboardCard_o * (*)(HistoryManager_o * _this)>(getAbsoluteAddress(targetLibName, HistoryManager_GetCurrentBigCard_Offset));
+
+    il2cpp::EntityBase_GetTag = reinterpret_cast<int (*)(EntityBase_o * _this, int tag)>(getAbsoluteAddress(targetLibName, EntityBase_GetTag_Offset));
+
+    il2cpp::System_Xml_XmlConvert_ToGuid = reinterpret_cast<System_Guid_o(*)(System_String_o * s)>(getAbsoluteAddress(targetLibName, System_Xml_XmlConvert_ToGuid_Offset));
+
+    il2cpp::System_Guid_ToString = reinterpret_cast<System_String_o * (*)(System_Guid_o * _this)>(getAbsoluteAddress(targetLibName, System_Guid_ToString_Offset));
+
+    il2cpp::UnityEngine_Application_OpenURL = reinterpret_cast<void (*)(System_String_o * url)>(getAbsoluteAddress(targetLibName, UnityEngine_Application_OpenURL_Offset));
+
+    il2cpp::Localization_GetLocaleName = reinterpret_cast<System_String_o * (*)()>(getAbsoluteAddress(targetLibName, Localization_GetLocaleName_Offset));
+
+    HOOK(targetLibName, HearthstoneApplication_Awake_Offset, HearthstoneApplication_Awake, il2cpp::HearthstoneApplication_Awake);
+
+    HOOK(targetLibName, Time_set_timeScale_Offset, Time_set_timeScale, il2cpp::Time_set_timeScale);
+
+    HOOK(targetLibName, GameMgr_OnGameSetup_Offset, GameMgr_OnGameSetup, il2cpp::GameMgr_OnGameSetup);
+    HOOK(targetLibName, GameMgr_OnGameCanceled_Offset, GameMgr_OnGameCanceled, il2cpp::GameMgr_OnGameCanceled);
+    HOOK(targetLibName, GameMgr_OnGameEnded_Offset, GameMgr_OnGameEnded, il2cpp::GameMgr_OnGameEnded);
+
+    HOOK(targetLibName, SocialToastMgr_AddToast_Offset, SocialToastMgr_AddToast, il2cpp::SocialToastMgr_AddToast);
+
+    HOOK(targetLibName, RemoteActionHandler_CanReceiveEnemyEmote_Offset, RemoteActionHandler_CanReceiveEnemyEmote, il2cpp::RemoteActionHandler_CanReceiveEnemyEmote);
+
+    HOOK(targetLibName, Entity_LoadCard_Offset, Entity_LoadCard, il2cpp::Entity_LoadCard);
+    HOOK(targetLibName, EntityBase_GetPremiumType_Offset, EntityBase_GetPremiumType, il2cpp::EntityBase_GetPremiumType);
+
+    HOOK(targetLibName, Gameplay_OnCreateGame_Offset, Gameplay_OnCreateGame, il2cpp::Gameplay_OnCreateGame);
+
+    HOOK(targetLibName, PlayerLeaderboardManager_SetNextOpponent_Offset, PlayerLeaderboardManager_SetNextOpponent, il2cpp::PlayerLeaderboardManager_SetNextOpponent);
+    HOOK(targetLibName, PlayerLeaderboardManager_SetCurrentOpponent_Offset, PlayerLeaderboardManager_SetCurrentOpponent, il2cpp::PlayerLeaderboardManager_SetCurrentOpponent);
+
+    HOOK(targetLibName, PlayerLeaderboardCard_NotifyMousedOver_Offset, PlayerLeaderboardCard_NotifyMousedOver, il2cpp::PlayerLeaderboardCard_NotifyMousedOver);
+
+    HOOK(targetLibName, Network_Update_Offset, Network_Update, il2cpp::Network_Update);
+    HOOK(targetLibName, Network_GetPlatformBuilder_Offset, Network_GetPlatformBuilder, il2cpp::Network_GetPlatformBuilder);
+
+    HOOK(targetLibName, UpdateUtils_OpenAppStore_Offset, UpdateUtils_OpenAppStore, il2cpp::UpdateUtils_OpenAppStore);
+
+    HOOK(targetLibName, Localization_SetPegLocaleName_Offset, Localization_SetPegLocaleName, il2cpp::Localization_SetPegLocaleName);
+
+    PATCH(targetLibName, MatchingQueueTab_Update_Patch_Offset, MatchingQueueTab_Update_Patch_Data);
+    PATCH(targetLibName, ThinkEmoteManager_Update_Patch_Offset, ThinkEmoteManager_Update_Patch_Data);
+    PATCH(targetLibName, PlatformSettings_EmulateMobileDevice_Patch_Offset, PlatformSettings_EmulateMobileDevice_Patch_Data);
+
+    HOOK(targetLibName, ThinkEmoteManager_Update_Offset, ThinkEmoteManager_Update, il2cpp::ThinkEmoteManager_Update);
+    
+    HOOK(targetLibName, Hearthstone_Devices_DeviceLocaleHelper_GetCurrentRegionId_Offset, Hearthstone_Devices_DeviceLocaleHelper_GetCurrentRegionId, il2cpp::Hearthstone_Devices_DeviceLocaleHelper_GetCurrentRegionId);
+    
+    HOOK(targetLibName, ConfigFile_Load_Offset, ConfigFile_Load_Hook, il2cpp::ConfigFile_Load);
+    HOOK(targetLibName, BnetUtils_GetAuroraEnvironmentName_Offset, BnetUtils_GetAuroraEnvironmentName_Hook, il2cpp::BnetUtils_GetAuroraEnvironmentName);
+    
+    LOGI(OBFUSCATE("Done"));
+}
+
+// Functions with `__attribute__((constructor))` are executed immediately when System.loadLibrary("lib_name") is called.
+// If there are multiple such functions at the same time, `constructor(priority)` (the priority is an integer)
+// will determine the execution priority, otherwise the execution order is undefined behavior.
+__attribute__((constructor))
+void lib_main() {
+    // Create a new thread so it does not block the main thread, means the game would not freeze
+    // In modern C++, you should use std::thread(yourFunction).detach() instead of pthread_create
+    std::thread(hack_thread).detach();
+}
